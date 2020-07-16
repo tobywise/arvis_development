@@ -1,0 +1,765 @@
+---
+title: "Avoidance of Respiratory Viral Infection Scale (ARVIS) development"
+output:
+  github_document:
+    html_preview: false
+---
+
+This [R Markdown](http://rmarkdown.rstudio.com) notebook runs the analyses reported in the Avoidance of Respiratory Virual Infection Scale (ARVIS) development paper.
+
+The steps performed are:
+
+_Study 1_
+
+  1. Response distribution and item correlation checks
+  2. Reliability checks
+  3. Exploratory factor analysis
+  4. Redundant item removal
+
+_Study 2_
+
+  1. Reliability checks
+  2. Confirmatory factor analysis
+  3. Factor model revision
+  4. Convergent & divergent validity checks
+  5. Criterion validity checks
+  
+_Study 3_
+  1. Internal consistency checks
+  2. Test-retest reliability
+  
+## Load packages
+
+```{r}
+library(tidyverse)
+library(corrplot)
+library(psych)
+library(lavaan)
+library(semTable)
+library(semPlot)
+library(Hmisc)
+library(cocor)
+library(irr)
+```
+
+# Study 1
+
+## Load data
+
+First read in the data
+
+```{r}
+data <- read.csv('../data/arvis_wide.csv')
+```
+
+Next remove any rows with NA and make sure the data is numeric
+
+```{r}
+data <- data %>% drop_na()
+```
+
+## Check data quality
+
+We included an attention check question (instructing subjects to choose a specific answer) - here we exclude subjects who didn't pass this
+
+```{r}
+print(sum(data$Fear_of_everyday_situations452 != 0, na.rm=TRUE))
+data <- data %>% subset(data$Fear_of_everyday_situations452 == 0)
+```
+
+And remove the attention check question
+
+
+```{r}
+data <- data %>% select(-c(Fear_of_everyday_situations452))
+write.csv(data, '../data/arvis_wide_clean.csv')
+```
+
+
+## Inspect response distributions
+
+First we need to check that we're getting non-skewed response distributions - items are less useful if some responses are rarely being endorsed.
+
+```{r, fig.width = 15}
+data %>% select(contains('Fear_')) %>%
+  keep(is.numeric) %>%
+  gather() %>%
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram()
+
+```
+
+Some items have clearly skewed distributions, with the vast majority of respondents selecting "strongly agree". We'll remove these items next.
+
+```{r}
+data <- data %>% select(-c('Fear_of_everyday_situations461', "Fear_of_everyday_situations455", "Fear_of_everyday_situations456",
+                                 "Fear_of_everyday_situations463", "Fear_of_everyday_situations464", "Fear_of_everyday_situations465",
+                                 "Fear_of_everyday_situations466", "Fear_of_everyday_situations450"))
+write.csv(data, '../data/ARVIS_wide_cleaned_distributions.csv')
+```
+
+
+## Inspect inter-item correlations
+
+Next we look for items with low correlations with other scale items.
+
+```{r}
+fear_data <- data %>% select(contains('Fear_')) 
+cormat <- round(cor(fear_data),2)
+
+corrplot(cormat, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45)
+
+```
+
+Overall it seems that the items are moderately correlated, which is good. However some items have fairly low correlations with most other items, implying that they maybe aren't measuring quite the same underlying construct.
+
+Next we remove items that have mean inter-item correlations under .4, after setting the diagonal to zero.
+
+```{r}
+diag(cormat) <- 0
+rowMeans(cormat) < .4
+```
+
+```{r}
+efa_data <- data %>% select(-c('subjectID', 'Fear_of_everyday_situations448', 'Fear_of_everyday_situations458',
+                                 'Fear_of_everyday_situations459'))
+efa_data <- efa_data %>% select(contains('Fear_'))
+```
+
+## Check reliability
+
+We use the `omega` function to check alpha and omega.
+
+```{r}
+omega(efa_data)
+```
+
+This looks good, with $\alpha$ = 0.95 and $\omega$ = 0.96. However, this could be cause for some concern as very high internal consistency values may suggest some items are redundant.
+
+## Exploratory factor analysis
+
+Before performing factor analysis, we first use Barlett's test of sphericity to check that the data is appropriate for EFA.
+
+```{r}
+cortest.bartlett(efa_data)
+```
+
+This is significant, which is good!
+
+Next, we fit the FA model using maximum likelihood and use parallel analysis to determine the number of factors.
+
+```{r}
+parallel = fa.parallel(efa_data, fm='ml', fa='fa', n.iter=100, SMC=TRUE,  quant=.95)
+
+parallel_df <- data.frame(real_values = parallel$fa.values, sim_values = parallel$fa.sim)
+write.csv(parallel_df, '../data/parallel_analysis_T1.csv', row.names = FALSE)
+```
+
+This suggests that the optimal number of factors is two. However it's best to seek additional evidence for this. To do this, we fit models with 1, 2, and 3 factors and inspect model fit statistics.
+
+```{r}
+fa_model_1f <- fa(efa_data, nfactors=1, fm="ml", rotate='oblimin')
+fa_model_2f <- fa(efa_data, nfactors=2, fm="ml", rotate='oblimin')
+fa_model_3f <- fa(efa_data, nfactors=3, fm="ml", rotate='oblimin')
+```
+
+And then check the BIC, a model fit index that penalises according to model complexity
+
+```{r}
+fa_model_1f$BIC
+fa_model_2f$BIC
+fa_model_3f$BIC
+```
+
+We also check the RMSEA of the two-factor model to ensure the fit is good
+
+```{r}
+fa_model_2f$RMSEA
+```
+
+This suggests a 3 factor model provides the best fit (although CIs ovelap), but the 2 factor model is still "good". The RMSEA does not account for model complexity, and is therefore more susceptible to over-valuing models that overfit the data.
+
+## Trim items
+
+We next remove items that don't load cleanly on to either of these two factors (showing a <.4 difference between loadings on to Factors 1 and 2), as these items likely have low discriminative validity.
+
+```{r}
+fa_model_2f$loadings
+write.csv(data.frame(unclass(fa_model_2f$loadings)), '../data/fa_model_2f_A_loadings.csv')
+```
+
+```{r}
+# Remove items with cross loadings (<.3 difference between factors)
+efa_data <- efa_data %>% select(-c('Fear_of_everyday_situations442', 'Fear_of_everyday_situations457',
+                                       'Fear_of_everyday_situations467'))
+```
+
+
+We then check reliability again to make sure this hasn't had a negative effect.
+
+```{r}
+omega(efa_data)
+```
+
+
+This still demonstrates high $\alpha$ and $\omega$.
+
+We then rerun the EFA and check we still get two factors
+
+```{r}
+parallel = fa.parallel(efa_data, fm='ml', fa='fa', n.iter=100, SMC=TRUE,  quant=.95)
+```
+
+The parallel analysis still indicates two factors
+
+```{r}
+fa_model_2f <- fa(efa_data, nfactors=2, fm="ml", rotate='oblimin')
+fa_model_2f
+```
+
+
+Finally, we look at whether we can remove items with lower loadings and retain high reliability. First, this makes the measure shorter and hence quicker to complete. Second, the reliability estimates are very high which might suggest redundancy in the items.
+
+The first factor has 7 items loading on to it, while the second has 4. We take the weakest 3 items primarily loading on to the first factor and remove them so we end up with 4 items loading primarily on to each factor.
+
+
+```{r}
+fa_model_2f$loadings
+```
+
+```{r}
+reduced_data <- efa_data %>% select(c('Fear_of_everyday_situations441', 'Fear_of_everyday_situations447', 'Fear_of_everyday_situations449',
+                                        'Fear_of_everyday_situations460',
+                                        'Fear_of_everyday_situations445', 'Fear_of_everyday_situations453', 'Fear_of_everyday_situations454',
+                                        'Fear_of_everyday_situations462'))
+
+```
+
+
+Then we check reliability
+
+```{r}
+omega(reduced_data)
+```
+
+
+The values of $\alpha$ and $\omega$ have reduced slightly, but are still high, as expected.
+
+We then check that the same factor structure emerges.
+
+
+```{r}
+parallel = fa.parallel(reduced_data, fm='ml', fa='fa', n.iter=100, SMC=TRUE,  quant=.95)
+```
+
+
+This still suggests 2 factors.
+
+
+```{r}
+fa_model_2f_reduced <- fa(reduced_data, nfactors=2, fm="ml", rotate='oblimin')
+
+fa_model_2f_reduced
+```
+
+One thing to note here is that the factors are highly correlated (r = .76), which could indicates a large degree of overlap.
+
+Finally, we can plot a diagram illustrating the factor structure
+
+```{r}
+fa.diagram(fa_model_2f_reduced)
+```
+
+
+# Study 2
+
+
+## Load data
+
+
+```{r}
+validation_data <- read.csv('../data/arvis_wide_sample2.csv')
+validation_data <- validation_data %>% drop_na()
+```
+
+
+## Exclude subjects who fail attention check
+
+```{r}
+print(sum(validation_data$Fear_of_everyday_situations452 != 0, na.rm=TRUE))
+validation_data <- validation_data %>% subset(validation_data$Fear_of_everyday_situations452 == 0)
+validation_data <- validation_data %>% select(-c(Fear_of_everyday_situations452))
+```
+
+## Check reliability
+
+Here we select the 8 items we settled on in Study 1 and check their reliability in this sample
+
+```{r}
+omega(validation_data %>% select(c('Fear_of_everyday_situations441', 'Fear_of_everyday_situations447', 'Fear_of_everyday_situations449',
+                                        'Fear_of_everyday_situations460',
+                                        'Fear_of_everyday_situations445', 'Fear_of_everyday_situations453', 'Fear_of_everyday_situations454',
+                                        'Fear_of_everyday_situations462')))
+
+```
+
+Here $\alpha$ = .89 and $\omega$ = .91, so this looks good.
+
+## Confirmatory factor analysis
+
+Next, we use the factor structure identified in Study 1 and examine how well it fits the data from Study 2. We also compare this against a single factor solution, given that the factors were highly correlated.
+
+```{r}
+fa_structure_2f <- "
+Others =~ Fear_of_everyday_situations445 + Fear_of_everyday_situations453 + Fear_of_everyday_situations454 + Fear_of_everyday_situations462
+Infection =~ Fear_of_everyday_situations441 + Fear_of_everyday_situations447 + Fear_of_everyday_situations449 + Fear_of_everyday_situations460
+"
+
+fa_structure_1f <- "
+ARVIS =~ Fear_of_everyday_situations445 + Fear_of_everyday_situations453 + Fear_of_everyday_situations454 + Fear_of_everyday_situations462 +
+Fear_of_everyday_situations441 + Fear_of_everyday_situations447 + Fear_of_everyday_situations449 + Fear_of_everyday_situations460
+"
+```
+
+
+```{r}
+cfa_fit_1f <- cfa(fa_structure_1f, data = validation_data, std.lv = TRUE)
+cfa_fit_2f <- cfa(fa_structure_2f, data = validation_data, std.lv = TRUE)
+```
+
+Here is an illustration of the fitted two factor model, for comparison with the EFA model in Study 1
+
+```{r, fig.width=13}
+semPaths(cfa_fit_2f, what = "std", whatLabels = "std", 
+         residuals = TRUE, intercepts = FALSE,
+         # prettify
+         fade = TRUE, sizeMan=3, layout='tree', rotation=4, curve=2,
+         style = "lisrel", sizeLat = 8, 
+         nCharNodes = 50, 
+         edge.label.cex = 0.5, edge.color='#4a4a4a',
+         color = list(lat = rgb(219, 219, 219, maxColorValue = 255), 
+                      man = rgb(117, 188, 255, maxColorValue = 255)))
+```
+
+
+The individual items all load fairly strongly onto their respective factors, which is good. However there is a high degree of correlation between factors (.82).
+
+We can then evaluate the fit of the one and two factor model.
+
+```{r}
+compareLavaan(c('One factor' = cfa_fit_1f, 'Two factor' = cfa_fit_2f))
+```
+
+This indicates that the two factor model provides the best fit, however the fit of this model could be a lot better. For example, RMSEA is .10, which is the generally accepted cutoff for an acceptable model fit. Other metrics are better, but not excellent (e.g. CFI > .9 but not > .95).
+
+To see if we can improve things, we take a look at the modification indices. This suggests way in which the model can be modified to improve fit.
+
+```{r}
+modificationIndices(cfa_fit_2f, sort.=TRUE, minimum.value=3)
+```
+
+
+The highest scoring term identified here is covarying erors between two of the items, indicating that that accounting for this error covariance in the model would improve fit substantially.
+
+We then try to fit this model, and a one factor model with this error covariance term added
+
+```{r}
+
+fa_structure_1f_cov <- "
+ARVIS =~ Fear_of_everyday_situations445 + Fear_of_everyday_situations453 + Fear_of_everyday_situations454 + Fear_of_everyday_situations462 +
+Fear_of_everyday_situations441 + Fear_of_everyday_situations447 + Fear_of_everyday_situations449 + Fear_of_everyday_situations460
+Fear_of_everyday_situations449 ~~ Fear_of_everyday_situations460
+"
+
+fa_structure_2f_cov <- "
+Others =~ Fear_of_everyday_situations445 + Fear_of_everyday_situations453 + Fear_of_everyday_situations454 + Fear_of_everyday_situations462
+Infection =~ Fear_of_everyday_situations441 + Fear_of_everyday_situations447 + Fear_of_everyday_situations449 + Fear_of_everyday_situations460
+Fear_of_everyday_situations449 ~~ Fear_of_everyday_situations460
+"
+```
+
+
+
+```{r}
+cfa_fit_1f_cov <- cfa(fa_structure_1f_cov, data = validation_data, std.lv = TRUE)
+cfa_fit_2f_cov <- cfa(fa_structure_2f_cov, data = validation_data, std.lv = TRUE)
+```
+
+And we can then evaluate the fit of these two models relative to the previous one
+
+```{r}
+comparison_cov <- compareLavaan(c('One factor' = cfa_fit_1f, 'One factor, covariance term' = cfa_fit_1f_cov, 'Two factor' = cfa_fit_2f, 'Two factor, covariance term' = cfa_fit_2f_cov))
+comparison_cov
+write.csv(comparison_cov, '../data/comparison_cov.csv')
+```
+
+This clearly shows that the model fit has improved by including this term. All fit indices are now excellent (RMSEA < .08, CFI > .95, SRMR < .05, $\chi^2$ almost non-significant).
+
+However this model isn't ideal - it's generally not good to have to include covarying errors unless this is theoretically motivated. This indicates that two of our items are likely highly correlated and therefore redundant, which suggests that simply removing one of them may have a beneficial effect, and mean we can avoid modelling the covariance between them.
+
+We can try this to see how it affects model fit. We'll remove item 460 as it has the lowest loading. 
+
+```{r}
+fa_structure_2f <- "
+Others =~ Fear_of_everyday_situations445 + Fear_of_everyday_situations453 + Fear_of_everyday_situations454 + Fear_of_everyday_situations462
+Infection =~ Fear_of_everyday_situations441 + Fear_of_everyday_situations447 + Fear_of_everyday_situations449
+"
+
+
+fa_structure_1f <- "
+ARVIS =~ Fear_of_everyday_situations445 + Fear_of_everyday_situations453 + Fear_of_everyday_situations454 + Fear_of_everyday_situations462 + Fear_of_everyday_situations441 + 
+Fear_of_everyday_situations447 + Fear_of_everyday_situations449
+"
+
+```
+
+```{r}
+cfa_fit_2f_item_removed <- cfa(fa_structure_2f, data = validation_data, std.lv = TRUE)
+cfa_fit_1f_item_removed <- cfa(fa_structure_1f, data = validation_data, std.lv = TRUE)
+```
+
+We can then look at how well this model fits
+
+```{r}
+comparison_reduced <- compareLavaan(c('One factor, item removed' = cfa_fit_1f_item_removed, 'Two factor, item removed' = cfa_fit_2f_item_removed))
+comparison_reduced
+write.csv(comparison_reduced, '../data/comparison_reduced.csv')
+```
+
+And compare the two
+
+```{r}
+anova(cfa_fit_1f_item_removed, cfa_fit_2f_item_removed)
+```
+
+
+While not as good as the model that incorporates a covariance term, this does a much better job than the original model. All model fit metrics are in the excellent range for both the one and two factor model, although the two factor model remains the best fitting.
+
+We can plot the structure of this model to see what it looks like
+
+```{r, fig.width=13}
+# pdf('../figures/2factor_model.pdf')
+semPaths(cfa_fit_2f_item_removed, what = "std", whatLabels = "std", 
+         residuals = TRUE, intercepts = FALSE,
+         # prettify
+         fade = TRUE, sizeMan=8, layout='tree', rotation=4, curve=2,
+         style = "lisrel", sizeLat = 8, 
+         nCharNodes = 50, 
+         edge.label.cex = 0.5, edge.color='#4a4a4a',
+         color = list(lat = rgb(219, 219, 219, maxColorValue = 255), 
+                      man = rgb(117, 188, 255, maxColorValue = 255)))
+# dev.off()
+```
+
+This indicates a problem however - the two factors are now correlated at .88, which is problematic. This suggests that there is a large degree of overlap between the two factors, and while there is clearly some evidence for a two factor structure, it is not clear.
+
+In order to select the most parsimonious model, we therefore select the one factor model, which still demonstrates excellent fit to the data.
+
+
+```{r, fig.width=13}
+# pdf('../figures/1factor_model.pdf')
+semPaths(cfa_fit_1f_item_removed, what = "std", whatLabels = "std", 
+         residuals = TRUE, intercepts = FALSE,
+         # prettify
+         fade = TRUE, sizeMan=8, layout='tree', rotation=4, curve=2,
+         style = "lisrel", sizeLat = 8, 
+         nCharNodes = 50, 
+         edge.label.cex = 0.5, edge.color='#4a4a4a',
+         color = list(lat = rgb(219, 219, 219, maxColorValue = 255), 
+                      man = rgb(117, 188, 255, maxColorValue = 255)))
+# dev.off()
+```
+
+Let's get the factor loadings for both these models.
+
+```{r}
+parameterEstimates(cfa_fit_2f_item_removed, standardized=TRUE) %>% 
+             filter(op == "=~") %>% 
+             select('Latent Factor'=lhs, Indicator=rhs, B=est, SE=se, Z=z, Beta=std.all)
+
+
+```
+
+```{r}
+parameterEstimates(cfa_fit_1f_item_removed, standardized=TRUE) %>% 
+             filter(op == "=~") %>% 
+             select('Latent Factor'=lhs, Indicator=rhs, B=est, SE=se, Z=z, Beta=std.all)
+
+```
+
+
+```{r}
+estimates <- standardizedsolution(cfa_fit_1f_item_removed)
+estimates
+write.csv(estimates, '../data/final_cfa_model_estimates.csv')
+```
+
+
+This results in a 7-item, unidimensional scale.
+
+Finally, we check the reliability of this measure
+
+```{r}
+final_data <- validation_data %>% select(c('Fear_of_everyday_situations445', 'Fear_of_everyday_situations453', 
+                                           'Fear_of_everyday_situations454', 'Fear_of_everyday_situations462',
+                                           'Fear_of_everyday_situations441', 'Fear_of_everyday_situations447',
+                                           'Fear_of_everyday_situations449'))
+
+omega(final_data)
+```
+
+This is a little lower before, but still very good - $\alpha$ = .87 and $\omega$ = .9
+
+
+## Convergent and divergent validity
+
+Next we check the validity of the scale - how well does it predict scores on other measures.
+
+First we get the data and combine it with our existing data
+
+```{r}
+validity_data <- read.csv('../data/arvis_other_measures.csv')
+subjectID <- validation_data$subjectID
+final_data_id <- cbind(final_data, subjectID)
+
+validity_data <- merge(validity_data, final_data_id, by='subjectID')
+validity_data <- merge(validity_data, validation_data %>% select(!contains('Fear_')), by='subjectID')
+
+```
+
+Then calculate sum scores on the different questionnaire measures
+
+```{r}
+ARVIS_scores <- rowSums(validity_data %>% select(contains('Fear_')))
+STICSA_scores <- rowSums(validity_data %>% select(contains('STICSA')))
+BDI_scores <- rowSums(validity_data %>% select(contains('Depression')))
+SHAI_scores <- rowSums(validity_data %>% select(contains('Health_')))
+SIA_scores <- rowSums(validity_data %>% select(contains('Social_interaction_')))
+SPQ_scores <- rowSums(validity_data %>% select(contains('Social_phobia')))
+OASIS_scores <- rowSums(validity_data %>% select(contains('OASIS')))
+
+convergent_validity_df <- cbind(ARVIS_scores, STICSA_scores, OASIS_scores, BDI_scores, SHAI_scores, SIA_scores, SPQ_scores)
+write.csv(convergent_validity_df, '../data/convergent_validity_df.csv', row.names = FALSE)
+
+```
+
+
+We can then look at the correlations between these items
+
+```{r}
+rcorr(convergent_validity_df)
+```
+
+While none of these correlations are especially high, the highest are with health anxiety (SHAI) and state anxiety (OASIS), as expected.
+
+
+
+The most important check here though is whether the correlations differ significantly between the convergent measures (SHAI, OASIS) and divergent measures (BDI, SIA, SPQ). Here we test this
+
+```{r}
+cc_OASIS_STICSA <- cocor(~ARVIS_scores + OASIS_scores | ARVIS_scores + STICSA_scores, convergent_validity_df, return.htest=TRUE)
+cc_OASIS_BDI <- cocor(~ARVIS_scores + OASIS_scores | ARVIS_scores + BDI_scores, convergent_validity_df, return.htest=TRUE)
+cc_OASIS_SIA <- cocor(~ARVIS_scores + OASIS_scores | ARVIS_scores + SIA_scores, convergent_validity_df, return.htest=TRUE)
+cc_OASIS_SPQ <- cocor(~ARVIS_scores + OASIS_scores | ARVIS_scores + SPQ_scores, convergent_validity_df, return.htest=TRUE)
+
+cc_SHAI_STICSA <- cocor(~ARVIS_scores + SHAI_scores | ARVIS_scores + STICSA_scores, convergent_validity_df, return.htest=TRUE)
+cc_SHAI_BDI <- cocor(~ARVIS_scores + SHAI_scores | ARVIS_scores + BDI_scores, convergent_validity_df, return.htest=TRUE)
+cc_SHAI_SIA <- cocor(~ARVIS_scores + SHAI_scores | ARVIS_scores + SIA_scores, convergent_validity_df, return.htest=TRUE)
+cc_SHAI_SPQ <- cocor(~ARVIS_scores + SHAI_scores | ARVIS_scores + SPQ_scores, convergent_validity_df, return.htest=TRUE)
+```
+
+
+```{r}
+
+measures_OASIS <- c('cc_OASIS_STICSA', 'cc_OASIS_BDI', 'cc_OASIS_SIA', 'cc_OASIS_SPQ')
+
+OASIS_zs <- c()
+OASIS_ps <- c()
+
+for (q in measures_OASIS) {
+  cc <- get(q)
+  z <- cc$hittner2003$statistic
+  p <- cc$hittner2003$p.value
+  
+  OASIS_zs <- rbind(OASIS_zs, z)
+  OASIS_ps <- rbind(OASIS_ps, p)
+}
+
+OASIS_cc_df <- as.data.frame(cbind(measures_OASIS, OASIS_zs, OASIS_ps))
+colnames(OASIS_cc_df) <- c('Measures', 'Z', 'pval')
+
+measures_SHAI <- c('cc_SHAI_STICSA', 'cc_SHAI_BDI', 'cc_SHAI_SIA', 'cc_SHAI_SPQ')
+
+SHAI_zs <- c()
+SHAI_ps <- c()
+
+for (q in measures_SHAI) {
+  cc <- get(q)
+  z <- cc$hittner2003$statistic
+  p <- cc$hittner2003$p.value
+  
+  SHAI_zs <- rbind(SHAI_zs, z)
+  SHAI_ps <- rbind(SHAI_ps, p)
+}
+
+SHAI_cc_df <- as.data.frame(cbind(measures_SHAI, SHAI_zs, SHAI_ps))
+colnames(SHAI_cc_df) <- c('Measures', 'Z', 'pval')
+
+```
+
+```{r}
+OASIS_cc_df
+SHAI_cc_df
+
+write.csv(OASIS_cc_df, '../data/OASIS_cc_df.csv', row.names = FALSE)
+write.csv(SHAI_cc_df, '../data/SHAI_cc_df.csv', row.names = FALSE)
+```
+
+This demonstrates that the correlation between our measure (ARVIS) and the OASIS are significantly higher than the divergent validity measures. Correlations between the ARVIS and the SHAI are significantly higher than with the social anxiety measures, but not quite significant with the STICSA and BDI.
+
+### Correlations with COVID threat
+
+In the original sample, we have data for the 10-item COVID threat scale
+
+```{r}
+covid_threat_data <- data.frame(data %>% select(c('Fear_of_everyday_situations445', 'Fear_of_everyday_situations453', 
+                                               'Fear_of_everyday_situations454', 'Fear_of_everyday_situations462',
+                                               'Fear_of_everyday_situations441', 'Fear_of_everyday_situations447',
+                                               'Fear_of_everyday_situations449')), data %>% select(contains('Pandemic_effects')))
+S1_ARVIS_scores <- rowSums(covid_threat_data %>% select(contains('Fear_')))
+S1_Symbolic_threat_scores <- rowSums(covid_threat_data %>% select(c('Pandemic_effects468', 'Pandemic_effects469', 'Pandemic_effects470', 'Pandemic_effects471', 'Pandemic_effects472')))
+S1_Realistic_threat_scores <- rowSums(covid_threat_data %>% select(c('Pandemic_effects473', 'Pandemic_effects474', 'Pandemic_effects475', 'Pandemic_effects476', 'Pandemic_effects477')))
+
+S1_convergent_validity_df <- cbind(S1_ARVIS_scores, S1_Symbolic_threat_scores, S1_Realistic_threat_scores)
+
+```
+
+```{r}
+rcorr(S1_convergent_validity_df)
+```
+
+This shows a dissociation between the two subscales of the COVID threat measure - interestingly the ARVIS is anticorrelated with symbolic threat
+
+We can check that the difference between correlations is significant again
+
+```{r}
+cc_Symbolic_Realistic_threat <- cocor(~S1_ARVIS_scores + S1_Symbolic_threat_scores | S1_ARVIS_scores + S1_Realistic_threat_scores, S1_convergent_validity_df, return.htest=TRUE)
+cc_Symbolic_Realistic_threat$hittner2003
+```
+
+
+
+## Criterion validity
+
+Finally we check criterion validity, that is whether the measure predicts an outcome that should be associated with it. For this, we use measures of self-reported protective behaviours. While this isn't perfect - it's self report rather than an objective measure (which would be difficult to acquire), it allows us to test whether virus-related fear predicts a behavioural outcome.
+
+```{r}
+avoiding_social <- validity_data$Behavior26
+handwashing <- validity_data$Behavior29
+staying_home <- validity_data$Behavior30
+
+behaviour <- cbind(ARVIS_scores, avoiding_social, handwashing, staying_home)
+
+write.csv(behaviour, '../data/behaviour_df.csv', row.names = FALSE)
+
+rcorr(behaviour, type='spearman')
+
+```
+
+All of these are highly significant.
+
+## Test-retest reliability - Study 3
+
+First get the time 2 data
+
+```{r}
+retest_data <- read.csv('../data/arvis_wide_retest.csv')
+
+T1_scores <- rowSums(reduced_data %>% select(contains('Fear_')) %>% select(-c('Fear_of_everyday_situations460')))
+T1_scores <- data.frame(T1_scores, subjectID=data$subjectID)
+
+T2_scores <- rowSums(retest_data %>% select(contains('Fear_')))
+T2_scores <- data.frame(T2_scores, subjectID=retest_data$subjectID)
+
+retest_scores <- merge(T1_scores, T2_scores)
+write.csv(retest_scores, '../data/retest_scores.csv', row.names = FALSE)
+
+# Number of subjects completing both time points
+nrow(retest_scores)
+
+```
+
+Check internal consistency at T2
+
+```{r}
+omega(retest_data %>% select(contains('Fear_')))
+```
+
+Still high, $\alpha$ = .9, $\omega$ = .93.
+
+
+Calculate Pearson's R between T1 and T2
+
+```{r}
+
+cor.test(retest_scores$T1_scores, retest_scores$T2_scores)
+
+```
+
+This gives a highly significant $r$ of .89.
+
+Next we calculate ICC(A,1)
+
+```{r}
+## Code taken from Pike et al., (2020)
+
+icc_a1<-icc(cbind(retest_scores$T1_scores, retest_scores$T2_scores),model = "twoway",
+    type = "agreement",
+    unit = "single", 
+    r0 = 0,
+    conf.level = 0.95)
+
+icc_a1
+```
+
+And ICC(C,1)
+
+```{r}
+icc_c1<-icc(cbind(retest_scores$T1_scores, retest_scores$T2_scores),model = "twoway",
+    type = "consistency",
+    unit = "single", 
+    r0 = 0,
+    conf.level = 0.95)
+
+icc_c1
+```
+
+Both of these are excellent (i.e. > .75) and highly significant
+
+
+Finally weplot the relationship between T1 and T2 scores
+
+```{r}
+lm_eqn <- function(x,y){
+    m <- lm(y ~ x);
+    eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(r)^2~"="~r2, 
+         list(a = format(unname(coef(m)[1]), digits = 2),
+              b = format(unname(coef(m)[2]), digits = 2),
+             r2 = format(summary(m)$r.squared, digits = 3)))
+    as.character(as.expression(eq));
+}
+
+
+ggplot(data=retest_scores,aes(x=T1_scores,y=T2_scores))+
+  geom_point()+
+  labs(x='Score time 1',y='Score time 2')+
+  geom_smooth(method = "lm", se=FALSE, color="black", formula = y ~ x)+
+  geom_text(x = 5, y = 25, label = lm_eqn(retest_scores$T1_scores,retest_scores$T2_scores), parse = TRUE)
+```
+
+
+
+
+
